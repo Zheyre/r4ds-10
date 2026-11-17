@@ -14,5 +14,106 @@ library(httr2)
 library(purrr)
 ```
 
+```{r}
+#| cache: true
+#| eval: false
+snapshot_urls <- c(
+  "https://web.archive.org/web/20150101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20170101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20190101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20210101/https://www.imdb.com/chart/top/",
+  "https://web.archive.org/web/20220201012049/https://www.imdb.com/chart/top/"
+)
+snapshot_years <- c(2015, 2017, 2019, 2021, 2022)
 
+scrape_snapshot <- function(url, snap_year) {
+  page <- request(url) |>
+    req_timeout(60) |>
+    req_retry(max_tries = 3) |>
+    req_perform() |>
+    resp_body_html()
+
+  chart <- page |>
+    html_element("table") |>
+    html_table()
+
+  votes <- page |>
+    html_elements("td.imdbRating strong") |>
+    html_attr("title")
+
+  tibble(rank_title = str_squish(chart[[2]]),
+         rating = chart[[3]],
+         votes = votes) |>
+    separate_wider_regex(
+      rank_title,
+      patterns = c(rank = "\\d+", "\\.\\s*",
+                   title = ".+", "\\s*\\(",
+                   year = "\\d{4}", "\\)")
+    ) |>
+    mutate(snap_year = snap_year,
+           rank = as.integer(rank),
+           year = as.integer(year),
+           rating = as.numeric(rating),
+           number = parse_number(str_extract(votes, "(?<=based on )[\\d,]+"))) |>
+    select(snap_year, rank, title, year, rating, number)
+}
+
+imdb_snapshots <- map2(snapshot_urls, snapshot_years, scrape_snapshot) |>
+  list_rbind()
+```
+
+```{r}
+imdb_snapshots <- read_rds("data/imdb_snapshots.rds")
+```
+
+```{r}
+rank_change <- imdb_snapshots |>
+  filter(snap_year %in% c(2015, 2022)) |>
+  select(title, year, snap_year, rank) |>
+  pivot_wider(names_from = snap_year,
+              values_from = rank,
+              names_prefix = "rank_") |>
+  drop_na() |>
+  mutate(change = rank_2015 - rank_2022)
+
+rank_change |>
+  arrange(desc(abs(change))) |>
+  slice_head(n = 10)
+```
+
+```{r}
+rank_change |>
+  mutate(decade = (year %/% 10) * 10) |>
+  summarize(avg_change = mean(change),
+            n = n(),
+            .by = decade) |>
+  arrange(decade)
+```
+
+```{r}
+imdb_snapshots |>
+  count(title, year, name = "n_snapshots") |>
+  count(n_snapshots)
+```
+
+```{r}
+rank_change |>
+  mutate(decade = (year %/% 10) * 10) |>
+  summarize(avg_change = mean(change), .by = decade) |>
+  mutate(direction = if_else(avg_change > 0, "Rose", "Fell"),
+         decade = factor(paste0(decade, "s"))) |>
+  ggplot(aes(x = avg_change, y = decade, fill = direction)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linewidth = 0.6) +
+  scale_fill_manual(values = c(Rose = "#2a9d8f", Fell = "#e76f51")) +
+  labs(
+    title = "Older films are sliding down the IMDb Top 250",
+    subtitle = "Average rank change from 2015 to 2022, by release decade",
+    x = "Average rank change (positive = moved up)",
+    y = "Release decade",
+    fill = "Direction",
+    caption = "Data: IMDb Top 250 via the Wayback Machine. n = 190 films in both the 2015 and 2022 snapshots."
+  ) +
+  theme_minimal()
+```
 
